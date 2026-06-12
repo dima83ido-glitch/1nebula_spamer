@@ -505,3 +505,188 @@ async def refresh_groups(account_id: int, authorization: Optional[str] = Header(
     except Exception as e:
         try:
             await client.
+            disconnect()
+        except Exception:
+            pass
+        raise HTTPException(500, str(e))
+
+
+# ═══════════════════════════════════════════════
+# MAILINGS
+# ═══════════════════════════════════════════════
+@app.post("/api/mailings")
+async def create_mailing(req: CreateMailingReq, authorization: Optional[str] = Header(None)):
+    user = get_user_by_token(authorization)
+    data = load_data()
+    acc = next((a for a in data["accounts"] if a["id"] == req.account_id), None)
+    if not acc:
+        raise HTTPException(404, "Аккаунт не найден")
+    if not user.get("is_admin") and acc.get("owner_id") != user["user_id"]:
+        raise HTTPException(403, "Нет доступа к аккаунту")
+    if not acc.get("supergroups"):
+        raise HTTPException(400, "Нет супергрупп")
+
+    mailing = {
+        "id": int(time.time() * 1000),
+        "owner_id": user["user_id"],
+        "account_id": req.account_id,
+        "name": req.name, "text": req.text, "delay": max(3, req.delay),
+        "total": len(acc["supergroups"]), "sent": 0, "failed": 0,
+        "status": "stopped", "last_error": "", "created_at": time.time(),
+    }
+    data["mailings"].append(mailing)
+    save_data(data)
+    return {"ok": True, "mailing": mailing}
+
+
+@app.get("/api/mailings")
+async def get_mailings(authorization: Optional[str] = Header(None)):
+    user = get_user_by_token(authorization)
+    data = load_data()
+    if user.get("is_admin"):
+        ms = data["mailings"]
+    else:
+        ms = [m for m in data["mailings"] if m.get("owner_id") == user["user_id"]]
+    return {"ok": True, "mailings": ms}
+
+
+@app.delete("/api/mailings/{mailing_id}")
+async def delete_mailing(mailing_id: int, authorization: Optional[str] = Header(None)):
+    user = get_user_by_token(authorization)
+    data = load_data()
+    m = next((mm for mm in data["mailings"] if mm["id"] == mailing_id), None)
+    if not m:
+        raise HTTPException(404, "Не найдена")
+    if not user.get("is_admin") and m.get("owner_id") != user["user_id"]:
+        raise HTTPException(403, "Нет доступа")
+    if mailing_id in MAILING_TASKS:
+        MAILING_TASKS[mailing_id].cancel()
+        MAILING_TASKS.pop(mailing_id, None)
+    data["mailings"] = [mm for mm in data["mailings"] if mm["id"] != mailing_id]
+    save_data(data)
+    return {"ok": True}
+
+
+async def run_mailing(mailing_id: int):
+    data = load_data()
+    mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
+    if not mailing:
+        return
+    acc = next((a for a in data["accounts"] if a["id"] == mailing["account_id"]), None)
+    if not acc:
+        return
+    proxy = parse_proxy(acc.get("proxy")) if acc.get("proxy") else None
+    client = TelegramClient(StringSession(acc["session_string"]), acc["api_id"], acc["api_hash"], proxy=proxy)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            mailing["status"] = "stopped"
+            mailing["last_error"] = "Сессия истекла"
+            save_data(data)
+            return
+        groups = acc.get("supergroups", [])
+        mailing["total"] = len(groups)
+        mailing["sent"] = 0
+        mailing["failed"] = 0
+        mailing["last_error"] = ""
+        save_data(data)
+
+        for group in groups:
+            data = load_data()
+            mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
+            if not mailing or mailing["status"] != "running":
+                break
+            try:
+                await client.send_message(group["id"], mailing["text"])
+                mailing["sent"] += 1
+            except FloodWaitError as e:
+                mailing["failed"] += 1
+                mailing["last_error"] = f"FloodWait {e.seconds}s"
+                save_data(data)
+                await asyncio.sleep(e.seconds + 1)
+                continue
+            except (ChatWriteForbiddenError, UserBannedInChannelError):
+                mailing["failed"] += 1
+                mailing["last_error"] = f"Нет прав: {group['title']}"
+            except SlowModeWaitError as e:
+                mailing["failed"] += 1
+
+                mailing["last_error"] = f"Slow mode {e.seconds}s"
+            except Exception as e:
+                mailing["failed"] += 1
+                mailing["last_error"] = f"{group['title']}: {str(e)[:80]}"
+            save_data(data)
+            for _ in range(mailing["delay"]):
+                await asyncio.sleep(1)
+                d2 = load_data()
+                m2 = next((m for m in d2["mailings"] if m["id"] == mailing_id), None)
+                if not m2 or m2["status"] != "running":
+                    break
+
+        data = load_data()
+        mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
+        if mailing and mailing["status"] == "running":
+            mailing["status"] = "finished"
+            save_data(data)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        data = load_data()
+        mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
+        if mailing:
+            mailing["status"] = "stopped"
+            mailing["last_error"] = str(e)[:120]
+            save_data(data)
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        MAILING_TASKS.pop(mailing_id, None)
+
+
+@app.post("/api/mailings/{mailing_id}/start")
+async def start_mailing(mailing_id: int, authorization: Optional[str] = Header(None)):
+    user = get_user_by_token(authorization)
+    data = load_data()
+    m = next((mm for mm in data["mailings"] if mm["id"] == mailing_id), None)
+    if not m:
+        raise HTTPException(404, "Не найдена")
+    if not user.get("is_admin") and m.get("owner_id") != user["user_id"]:
+        raise HTTPException(403, "Нет доступа")
+    if mailing_id in MAILING_TASKS and not MAILING_TASKS[mailing_id].done():
+        raise HTTPException(400, "Уже запущена")
+    m["status"] = "running"
+    m["sent"] = 0
+    m["failed"] = 0
+    m["last_error"] = ""
+    save_data(data)
+    MAILING_TASKS[mailing_id] = asyncio.create_task(run_mailing(mailing_id))
+    return {"ok": True}
+
+
+@app.post("/api/mailings/{mailing_id}/stop")
+async def stop_mailing(mailing_id: int, authorization: Optional[str] = Header(None)):
+    user = get_user_by_token(authorization)
+    data = load_data()
+    m = next((mm for mm in data["mailings"] if mm["id"] == mailing_id), None)
+    if not m:
+        raise HTTPException(404, "Не найдена")
+    if not user.get("is_admin") and m.get("owner_id") != user["user_id"]:
+        raise HTTPException(403, "Нет доступа")
+    m["status"] = "stopped"
+    save_data(data)
+    if mailing_id in MAILING_TASKS:
+        MAILING_TASKS[mailing_id].cancel()
+        MAILING_TASKS.pop(mailing_id, None)
+    return {"ok": True}
+
+
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+if name == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
