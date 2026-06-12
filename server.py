@@ -32,7 +32,7 @@ from telethon.errors import (
 DATA_FILE = "data.json"
 PENDING: Dict[str, dict] = {}
 MAILING_TASKS: Dict[int, asyncio.Task] = {}
-TOKENS: Dict[str, dict] = {}  # token -> {user_id, username, is_admin}
+TOKENS: Dict[str, dict] = {}
 
 
 # ═══════════════════════════════════════════════
@@ -52,7 +52,6 @@ def load_data():
                 return d
         except Exception:
             pass
-    # Создаём админа по умолчанию
     return {
         "users": [{
             "id": 1,
@@ -115,7 +114,6 @@ def require_admin(authorization: Optional[str]) -> dict:
 # ═══════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Инициализация: создаём data.json если его нет
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     yield
@@ -290,7 +288,6 @@ async def delete_user(user_id: int, authorization: Optional[str] = Header(None))
     if target.get("is_admin"):
         raise HTTPException(400, "Нельзя удалить администратора")
     data["users"] = [u for u in data["users"] if u["id"] != user_id]
-    # Удаляем токены этого юзера
     for tk in list(TOKENS.keys()):
         if TOKENS[tk]["user_id"] == user_id:
             TOKENS.pop(tk, None)
@@ -404,8 +401,7 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
         data = load_data()
         data["accounts"] = [a for a in data["accounts"] if a.get("phone") != req.phone]
         account_id = int(time.time() * 1000)
-        data["accounts"].
-        append({
+        data["accounts"].append({
             "id": account_id,
             "owner_id": user["user_id"],
             "phone": req.phone,
@@ -437,7 +433,6 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
 async def get_accounts(authorization: Optional[str] = Header(None)):
     user = get_user_by_token(authorization)
     data = load_data()
-    # Админ видит все, обычный юзер — только свои
     if user.get("is_admin"):
         accs = data["accounts"]
     else:
@@ -504,8 +499,7 @@ async def refresh_groups(account_id: int, authorization: Optional[str] = Header(
         raise
     except Exception as e:
         try:
-            await client.
-            disconnect()
+            await client.disconnect()
         except Exception:
             pass
         raise HTTPException(500, str(e))
@@ -610,7 +604,6 @@ async def run_mailing(mailing_id: int):
                 mailing["last_error"] = f"Нет прав: {group['title']}"
             except SlowModeWaitError as e:
                 mailing["failed"] += 1
-
                 mailing["last_error"] = f"Slow mode {e.seconds}s"
             except Exception as e:
                 mailing["failed"] += 1
@@ -686,7 +679,7 @@ if os.path.isdir("static"):
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-if name == "__main__":
+if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run(app, host="0.0.0.0", port=port)
