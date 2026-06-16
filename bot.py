@@ -154,5 +154,5 @@ BotCommand(command="start", description="🚀 Главное меню"),
         logger.critical("💥 Max retries reached, bot stopped")
 
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(run_bot())
