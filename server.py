@@ -1,4 +1,4 @@
-import os
+Import os
 import json
 import time
 import asyncio
@@ -32,7 +32,7 @@ from telethon.errors import (
 DATA_FILE = "data.json"
 PENDING: Dict[str, dict] = {}
 MAILING_TASKS: Dict[int, asyncio.Task] = {}
-TOKENS: Dict[str, dict] = {}
+TOKENS: Dict[str, dict] = {}  # token -> {user_id, username, is_admin}
 
 
 # ═══════════════════════════════════════════════
@@ -52,6 +52,7 @@ def load_data():
                 return d
         except Exception:
             pass
+    # Создаём админа по умолчанию
     return {
         "users": [{
             "id": 1,
@@ -114,6 +115,7 @@ def require_admin(authorization: Optional[str]) -> dict:
 # ═══════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Инициализация: создаём data.json если его нет
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     yield
@@ -287,7 +289,9 @@ async def delete_user(user_id: int, authorization: Optional[str] = Header(None))
         raise HTTPException(404, "Пользователь не найден")
     if target.get("is_admin"):
         raise HTTPException(400, "Нельзя удалить администратора")
+
     data["users"] = [u for u in data["users"] if u["id"] != user_id]
+    # Удаляем токены этого юзера
     for tk in list(TOKENS.keys()):
         if TOKENS[tk]["user_id"] == user_id:
             TOKENS.pop(tk, None)
@@ -433,6 +437,7 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
 async def get_accounts(authorization: Optional[str] = Header(None)):
     user = get_user_by_token(authorization)
     data = load_data()
+    # Админ видит все, обычный юзер — только свои
     if user.get("is_admin"):
         accs = data["accounts"]
     else:
