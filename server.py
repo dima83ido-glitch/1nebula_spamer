@@ -1,4 +1,4 @@
-Import os
+import os
 import json
 import time
 import asyncio
@@ -32,12 +32,9 @@ from telethon.errors import (
 DATA_FILE = "data.json"
 PENDING: Dict[str, dict] = {}
 MAILING_TASKS: Dict[int, asyncio.Task] = {}
-TOKENS: Dict[str, dict] = {}  # token -> {user_id, username, is_admin}
+TOKENS: Dict[str, dict] = {}
 
 
-# ═══════════════════════════════════════════════
-# DATA HELPERS
-# ═══════════════════════════════════════════════
 def load_data():
     if os.path.exists(DATA_FILE):
         try:
@@ -52,7 +49,6 @@ def load_data():
                 return d
         except Exception:
             pass
-    # Создаём админа по умолчанию
     return {
         "users": [{
             "id": 1,
@@ -91,16 +87,20 @@ def parse_proxy(proxy_str):
         return None
 
 
-# ═══════════════════════════════════════════════
-# AUTH
-# ═══════════════════════════════════════════════
 def get_user_by_token(authorization: Optional[str]) -> dict:
     if not authorization:
         raise HTTPException(401, "Не авторизован")
     token = authorization.replace("Bearer ", "").strip()
     if token not in TOKENS:
         raise HTTPException(401, "Неверный токен")
-    return TOKENS[token]
+
+    user_session = TOKENS[token]
+
+    if time.time() > user_session.get("expires_at", 0):
+        TOKENS.pop(token, None)
+        raise HTTPException(401, "Срок действия сессии истек (90 дней)")
+
+    return user_session
 
 
 def require_admin(authorization: Optional[str]) -> dict:
@@ -110,12 +110,8 @@ def require_admin(authorization: Optional[str]) -> dict:
     return user
 
 
-# ═══════════════════════════════════════════════
-# LIFESPAN
-# ═══════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Инициализация: создаём data.json если его нет
     if not os.path.exists(DATA_FILE):
         save_data(load_data())
     yield
@@ -132,9 +128,6 @@ app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
-# ═══════════════════════════════════════════════
-# STATIC
-# ═══════════════════════════════════════════════
 @app.get("/")
 async def root():
     path = "static/index.html"
@@ -148,9 +141,6 @@ async def health():
     return {"ok": True}
 
 
-# ═══════════════════════════════════════════════
-# MODELS
-# ═══════════════════════════════════════════════
 class LoginReq(BaseModel):
     username: str
     password: str
@@ -181,9 +171,6 @@ class CreateMailingReq(BaseModel):
     delay: int = 60
 
 
-# ═══════════════════════════════════════════════
-# AUTH ENDPOINTS
-# ═══════════════════════════════════════════════
 @app.post("/api/login")
 async def login(req: LoginReq):
     data = load_data()
@@ -196,10 +183,13 @@ async def login(req: LoginReq):
         raise HTTPException(401, "Неверный логин или пароль")
 
     token = secrets.token_urlsafe(32)
+    expires_in = time.time() + (90 * 24 * 60 * 60)
+
     TOKENS[token] = {
         "user_id": user["id"],
         "username": user["username"],
         "is_admin": user.get("is_admin", False),
+        "expires_at": expires_in,
     }
     return {
         "ok": True,
@@ -226,9 +216,6 @@ async def me(authorization: Optional[str] = Header(None)):
     return {"ok": True, "user": user}
 
 
-# ═══════════════════════════════════════════════
-# USERS MANAGEMENT (ADMIN)
-# ═══════════════════════════════════════════════
 @app.get("/api/users")
 async def get_users(authorization: Optional[str] = Header(None)):
     require_admin(authorization)
@@ -254,11 +241,9 @@ async def create_user(req: CreateUserReq, authorization: Optional[str] = Header(
         raise HTTPException(400, "Заполните логин и пароль")
     if len(req.password) < 4:
         raise HTTPException(400, "Пароль слишком короткий (минимум 4 символа)")
-
     data = load_data()
     if any(u["username"] == req.username for u in data["users"]):
         raise HTTPException(400, "Пользователь с таким логином уже существует")
-
     new_user = {
         "id": int(time.time() * 1000),
         "username": req.username.strip(),
@@ -289,9 +274,7 @@ async def delete_user(user_id: int, authorization: Optional[str] = Header(None))
         raise HTTPException(404, "Пользователь не найден")
     if target.get("is_admin"):
         raise HTTPException(400, "Нельзя удалить администратора")
-
     data["users"] = [u for u in data["users"] if u["id"] != user_id]
-    # Удаляем токены этого юзера
     for tk in list(TOKENS.keys()):
         if TOKENS[tk]["user_id"] == user_id:
             TOKENS.pop(tk, None)
@@ -299,20 +282,15 @@ async def delete_user(user_id: int, authorization: Optional[str] = Header(None))
     return {"ok": True}
 
 
-# ═══════════════════════════════════════════════
-# TELEGRAM: SEND CODE
-# ═══════════════════════════════════════════════
 @app.post("/api/send-code")
 async def send_code(req: SendCodeReq, authorization: Optional[str] = Header(None)):
     get_user_by_token(authorization)
-
     if req.phone in PENDING:
         try:
             await PENDING[req.phone]["client"].disconnect()
         except Exception:
             pass
         PENDING.pop(req.phone, None)
-
     proxy = parse_proxy(req.proxy) if req.proxy else None
     client = TelegramClient(
         StringSession(), req.api_id, req.api_hash, proxy=proxy,
@@ -353,13 +331,10 @@ async def send_code(req: SendCodeReq, authorization: Optional[str] = Header(None
 @app.post("/api/confirm-code")
 async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(None)):
     user = get_user_by_token(authorization)
-
     if req.phone not in PENDING:
         raise HTTPException(400, "Сначала запросите код")
-
     sess = PENDING[req.phone]
     client = sess["client"]
-
     if time.time() - sess["ts"] > 600:
         try:
             await client.disconnect()
@@ -367,7 +342,6 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
             pass
         PENDING.pop(req.phone, None)
         raise HTTPException(400, "Код устарел")
-
     try:
         await client.sign_in(phone=req.phone, code=req.code, phone_code_hash=sess["phone_hash"])
     except SessionPasswordNeededError:
@@ -388,7 +362,6 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
         raise HTTPException(400, "Код истёк")
     except Exception as e:
         raise HTTPException(500, f"Ошибка: {str(e)}")
-
     try:
         me_user = await client.get_me()
         session_string = client.session.save()
@@ -401,7 +374,6 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
                     "title": dialog.title or "Без названия",
                     "members": getattr(ent, "participants_count", 0) or 0,
                 })
-
         data = load_data()
         data["accounts"] = [a for a in data["accounts"] if a.get("phone") != req.phone]
         account_id = int(time.time() * 1000)
@@ -430,14 +402,10 @@ async def confirm_code(req: ConfirmReq, authorization: Optional[str] = Header(No
         raise HTTPException(500, f"Ошибка сбора чатов: {str(e)}")
 
 
-# ═══════════════════════════════════════════════
-# ACCOUNTS
-# ═══════════════════════════════════════════════
 @app.get("/api/accounts")
 async def get_accounts(authorization: Optional[str] = Header(None)):
     user = get_user_by_token(authorization)
     data = load_data()
-    # Админ видит все, обычный юзер — только свои
     if user.get("is_admin"):
         accs = data["accounts"]
     else:
@@ -460,7 +428,6 @@ async def delete_account(account_id: int, authorization: Optional[str] = Header(
         raise HTTPException(404, "Не найден")
     if not user.get("is_admin") and acc.get("owner_id") != user["user_id"]:
         raise HTTPException(403, "Нет доступа")
-
     data["accounts"] = [a for a in data["accounts"] if a["id"] != account_id]
     for m in data["mailings"]:
         if m.get("account_id") == account_id and m["id"] in MAILING_TASKS:
@@ -480,7 +447,6 @@ async def refresh_groups(account_id: int, authorization: Optional[str] = Header(
         raise HTTPException(404, "Не найден")
     if not user.get("is_admin") and acc.get("owner_id") != user["user_id"]:
         raise HTTPException(403, "Нет доступа")
-
     proxy = parse_proxy(acc.get("proxy")) if acc.get("proxy") else None
     client = TelegramClient(StringSession(acc["session_string"]), acc["api_id"], acc["api_hash"], proxy=proxy)
     try:
@@ -510,9 +476,6 @@ async def refresh_groups(account_id: int, authorization: Optional[str] = Header(
         raise HTTPException(500, str(e))
 
 
-# ═══════════════════════════════════════════════
-# MAILINGS
-# ═══════════════════════════════════════════════
 @app.post("/api/mailings")
 async def create_mailing(req: CreateMailingReq, authorization: Optional[str] = Header(None)):
     user = get_user_by_token(authorization)
@@ -524,7 +487,6 @@ async def create_mailing(req: CreateMailingReq, authorization: Optional[str] = H
         raise HTTPException(403, "Нет доступа к аккаунту")
     if not acc.get("supergroups"):
         raise HTTPException(400, "Нет супергрупп")
-
     mailing = {
         "id": int(time.time() * 1000),
         "owner_id": user["user_id"],
@@ -589,7 +551,6 @@ async def run_mailing(mailing_id: int):
         mailing["failed"] = 0
         mailing["last_error"] = ""
         save_data(data)
-
         for group in groups:
             data = load_data()
             mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
@@ -620,7 +581,6 @@ async def run_mailing(mailing_id: int):
                 m2 = next((m for m in d2["mailings"] if m["id"] == mailing_id), None)
                 if not m2 or m2["status"] != "running":
                     break
-
         data = load_data()
         mailing = next((m for m in data["mailings"] if m["id"] == mailing_id), None)
         if mailing and mailing["status"] == "running":
