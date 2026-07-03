@@ -1,4 +1,4 @@
-import os
+Import os
 import asyncio
 import logging
 from aiogram import Bot, Dispatcher, types
@@ -112,8 +112,7 @@ async def run_bot():
     # Устанавливаем команды
     try:
         await bot.set_my_commands([
-            types.
-BotCommand(command="start", description="🚀 Главное меню"),
+            types.BotCommand(command="start", description="🚀 Главное меню"),
             types.BotCommand(command="app", description="📱 Открыть приложение"),
             types.BotCommand(command="help", description="❓ Помощь"),
         ])
