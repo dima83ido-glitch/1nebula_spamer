@@ -11,8 +11,8 @@ from aiogram.exceptions import TelegramConflictError
 # ═══════════════════════════════════════════════
 # НАСТРОЙКИ
 # ═══════════════════════════════════════════════
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8692931256:AAEIIC1zo-iqGgTwDNb0D4uTGKt9CqyYdes")
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://nebula-app-5.onrender.com")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8692931256:AAH5GraAOjj7wM8KQ-QqHlbt8ZzHIOAMJss")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://onenebula-spamer.onrender.com")
 IMAGE_PATH = "static/welcome.jpg"
 
 WELCOME_TEXT = """Вас приветствует <b>ORION parcer</b> 🚗
